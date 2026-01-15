@@ -26,7 +26,7 @@ The application is designed to enhance information retrieval and generation by i
 
 1. **Clone the repository**:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/sahilsnghai/standalone-rag
    ```
 
 2. **Install dependencies**:
