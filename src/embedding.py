@@ -7,7 +7,6 @@ from utils.config import Config
 class EmbeddingModel:
     def __init__(self):
         model_name = Config.EMBEDDING_MODEL
-        print("embeeding model name:" , model_name)
 
         if model_name.startswith("text-embedding") or model_name.startswith("openai"):
             self.model = OpenAIEmbeddings(model=model_name)

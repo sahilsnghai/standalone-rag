@@ -42,14 +42,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 chunker = Chunker()
-rag_graph = RAGGraph()
+
+embedder = EmbeddingModel()
+vector_store = VectorStore(embedder)
+
+tools = []
+rag_graph = RAGGraph(tools=tools)
 evaluator = RAGEvaluator()
 
 
 async def get_vector_store() -> tuple[VectorStore, EmbeddingModel]:
 
-    embedder = EmbeddingModel()
-    vector_store = VectorStore(embedder)
+    
 
     return vector_store, embedder
 
@@ -156,7 +160,6 @@ async def upload_file(
         raise HTTPException(status_code=400, detail="No content extracted")
 
     text = "\n".join(d.page_content for d in docs if d.page_content)
-    print(f"{text = }")
     if not text.strip():
         raise HTTPException(status_code=400, detail="Empty document")
 
@@ -219,8 +222,7 @@ async def query(
     pipeline = RetrievalPipeline(retriever)
     docs = await pipeline.retrieve(req.query)
 
-    result = await rag_graph.generate(req.query, docs)
-    print("Assistant response: ", result)
+    result = await rag_graph.stream(req.query, docs)
 
     bgts.add_task(add_message, db, req.chat_id, "user", req.query)
     bgts.add_task(add_message, db, req.chat_id, "assistant", result["answer"])
