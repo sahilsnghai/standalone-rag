@@ -1,35 +1,46 @@
-from fastapi import FastAPI, UploadFile, Depends, HTTPException, Response, BackgroundTasks
-from typing import List, Dict
-from uuid import UUID
-from pathlib import Path
-from contextlib import asynccontextmanager
 import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Dict, List
+from uuid import UUID
 
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Response,
+    UploadFile,
+)
 from langchain_core.documents import Document
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.schemas import QueryRequest, QueryResponse
-from db.db import init_db, get_db
+from db.db import get_db, init_db
 from db.repository import (
-    create_chat,
-    list_chats,
     add_message,
-    get_chat_history,
+    create_chat,
     delete_chat_by_id,
-    save_chat_file,
     get_chat_files,
+    get_chat_history,
+    list_chats,
+    save_chat_file,
 )
-from src.chunking import Chunker
+from src.chunking import chunker
+from src.evaluation import evaluator
+from src.rag_graph import rag_graph
 from src.retrieval import RetrievalPipeline
-from src.rag_graph import RAGGraph
-from src.evaluation import RAGEvaluator
-from src.vector_store import VectorStore
-from src.embedding import EmbeddingModel
+from src.vector_store import vector_store
+from utils.logger import get_logger
+import aiofiles 
+import asyncio
+
+logger = get_logger()
 
 from langchain_community.document_loaders import (
+    TextLoader,
     UnstructuredPDFLoader,
     UnstructuredWordDocumentLoader,
-    TextLoader,
 )
 
 
@@ -41,17 +52,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-chunker = Chunker()
-rag_graph = RAGGraph()
-evaluator = RAGEvaluator()
+# chunker = Chunker()
+# rag_graph = RAGGraph()
+# evaluator = RAGEvaluator()
+# embedder = EmbeddingModel()
+# vector_store = VectorStore(embedder)
 
 
-async def get_vector_store() -> tuple[VectorStore, EmbeddingModel]:
+# async def get_vector_store() -> tuple[VectorStore, EmbeddingModel]:
+#     global embedder
 
-    embedder = EmbeddingModel()
-    vector_store = VectorStore(embedder)
-
-    return vector_store, embedder
+#     return vector_store, embedder
 
 
 def docs_to_dicts(docs: List[Document]) -> List[Dict]:
@@ -68,6 +79,7 @@ def docs_to_dicts(docs: List[Document]) -> List[Dict]:
 async def fetch_chats(
     db: AsyncSession = Depends(get_db),
 ) -> List[Dict]:
+    logger.info("Fetching all chats")
     chats = await list_chats(db)
     return [
         {
@@ -84,12 +96,14 @@ async def delete_chat(
     chat_id: str,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info(f"Deleting chat: {chat_id}")
     chat, deleted = await delete_chat_by_id(db, chat_id=chat_id)
 
     if not deleted:
+        logger.error(f"Chat not found for deletion: {chat_id}")
         raise HTTPException(status_code=404, detail="Error deleting chat")
-    vector_store, _ = await get_vector_store()
-    
+    # vector_store, _ = await get_vector_store()
+
     await vector_store.delete_collection(chat_id)
 
     return {
@@ -105,6 +119,7 @@ async def create_new_chat(
     chat_name: str,
     db: AsyncSession = Depends(get_db),
 ) -> Dict:
+    logger.info(f"Creating new chat: {chat_name}")
     chat = await create_chat(db, chat_name)
     return {
         "id": str(chat.id),
@@ -119,16 +134,24 @@ async def upload_file(
     file: UploadFile,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info(f"Starting upload process for file {file.filename} to chat {chat_id}")
     suffix = Path(file.filename).suffix.lower()
+
+    logger.info(f"Reading file content for {file.filename}...")
     raw = await file.read()
+    logger.info(f"File content read. Size: {len(raw)} bytes.")
 
     base_dir = Path("data/raw_data")
     base_dir.mkdir(parents=True, exist_ok=True)
 
     tmp_path = base_dir / f"{file.filename}"
 
-    with open(tmp_path, "wb") as f:
-        f.write(raw)
+    # Use aiofiles for async file writing
+    logger.info(f"Writing file to disk asynchronously...")
+    async with aiofiles.open(tmp_path, "wb") as f:
+        await f.write(raw)
+
+    logger.info(f"Stored the file in folder {tmp_path}")
 
     if suffix == ".txt":
         loader = TextLoader(tmp_path, encoding="utf-8")
@@ -148,20 +171,34 @@ async def upload_file(
         )
 
     else:
+        logger.error(f"Unsupported file type: {suffix}")
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
-    docs = loader.load()
+    logger.info("Loading document...")
+    docs = await loader.aload()
+    logger.info(f"Document loaded. Number of pages/elements: {len(docs)}")
 
     if not docs:
+        logger.error("No content extracted from file")
         raise HTTPException(status_code=400, detail="No content extracted")
 
-    text = "\n".join(d.page_content for d in docs if d.page_content)
-    print(f"{text = }")
+    # Run text extraction in thread pool to avoid blocking
+    logger.info("Extracting text from documents...")
+    text = await asyncio.to_thread(
+        lambda: "\n".join(d.page_content for d in docs if d.page_content)
+    )
+    logger.info(f"Extracted text length: {len(text)} characters")
+    logger.info(f"Extracted text preview: {text[:100]}...")
     if not text.strip():
+        logger.error("Empty document")
         raise HTTPException(status_code=400, detail="Empty document")
 
-    chunks = chunker.chunk(text)
+    # Run chunking in thread pool (CPU-intensive operation)
+    logger.info("Chunking text asynchronously...")
+    chunks = await asyncio.to_thread(chunker.chunk, text)
+    logger.info(f"Text chunked into {len(chunks)} chunks.")
     if not chunks:
+        logger.error("No chunks generated")
         raise HTTPException(status_code=400, detail="No chunks generated")
 
     metadatas = [
@@ -172,6 +209,7 @@ async def upload_file(
         for idx in range(len(chunks))
     ]
 
+    logger.info("Saving file metadata to DB...")
     await save_chat_file(
         db,
         chat_id=chat_id,
@@ -180,16 +218,19 @@ async def upload_file(
         file_type=suffix[1:],
         file_size=str(file.size),
     )
+    logger.info("File metadata saved.")
 
-    vector_store, _ = await get_vector_store()
-    vector_store: VectorStore
+    # vector_store, _ = await get_vector_store()
+    logger.info(f"Ensuring collection {chat_id} exists...")
     await vector_store.ensure_collection(chat_id)
 
+    logger.info(f"Adding {len(chunks)} chunks to vector store...")
     await vector_store.add(
         collection_name=chat_id,
         texts=chunks,
         metadatas=metadatas,
     )
+    logger.info("Chunks added to vector store successfully.")
 
     return {
         "status": "uploaded",
@@ -208,19 +249,32 @@ async def query(
     """
     Handle a query for a specific chat.
     """
+    logger.info(f"Received query for chat {req.chat_id}: {req.query}")
     start = time.time()
 
-    vector_store, _ = await get_vector_store()
+    # vector_store, _ = await get_vector_store()
 
+    logger.info(f"Checking collection existence for chat {req.chat_id}...")
     if await vector_store.ensure_collection(req.chat_id):
-        return Response(content="Newly created the chunk. kindly provide the Documents and rerun the query.")
+        logger.info(
+            f"Collection {req.chat_id} created during query (unexpected). Returning prompt to upload docs."
+        )
+        return Response(
+            content="Newly created the chunk. kindly provide the Documents and rerun the query."
+        )
 
+    logger.info("Starting similarity search...")
     retriever = await vector_store.similarity_search(req.chat_id, req.query, 5)
+    logger.info("Similarity search complete.")
+
+    logger.info("Starting retrieval pipeline...")
     pipeline = RetrievalPipeline(retriever)
     docs = await pipeline.retrieve(req.query)
+    logger.info(f"Retrieval pipeline complete. Retrieved {len(docs)} docs.")
 
+    logger.info("Starting generation...")
     result = await rag_graph.generate(req.query, docs)
-    print("Assistant response: ", result)
+    logger.info(f"Generation complete. Assistant response: {result}")
 
     bgts.add_task(add_message, db, req.chat_id, "user", req.query)
     bgts.add_task(add_message, db, req.chat_id, "assistant", result["answer"])
@@ -228,12 +282,15 @@ async def query(
     # add_message(db, req.chat_id, "user", req.query)
     # add_message(db, req.chat_id, "assistant", result["answer"])
 
+    logger.info("Starting evaluation...")
     evaluation = evaluator.evaluate(
         req.query,
         docs,
         result["answer"],
         start,
     )
+    logger.info(f"Evaluation complete: {evaluation}")
+
     response = QueryResponse(
         answer=result["answer"],
         retrieved_docs=docs_to_dicts(docs),
@@ -248,14 +305,17 @@ async def chat_history(
     chat_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info(f"Fetching history for chat: {chat_id}")
     return await get_chat_history(db, chat_id)
 
 
 @app.get("/chats/{chat_id}/files")
 async def list_chat_files(chat_id: UUID, db: AsyncSession = Depends(get_db)):
+    logger.info(f"Fetching files for chat: {chat_id}")
     return await get_chat_files(db, chat_id)
 
 
 @app.get("/health")
 def health():
+    logger.info("Health check")
     return {"status": "ok"}

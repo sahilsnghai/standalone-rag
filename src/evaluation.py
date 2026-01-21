@@ -1,5 +1,9 @@
 import time
-from typing import List, Dict, Any, Union
+from typing import Any, Dict, List, Union
+
+from utils.logger import get_logger
+
+logger = get_logger()
 
 from langchain_core.documents import Document
 
@@ -73,6 +77,7 @@ class RAGEvaluator:
         start_time: float
             Timestamp captured before the pipeline started.
         """
+        logger.info(f"Starting evaluation for query: '{query}'")
         # Normalise documents to dicts for internal processing.
         docs_dicts = [self._to_dict(d) for d in docs]
         latency = time.time() - start_time
@@ -80,7 +85,7 @@ class RAGEvaluator:
         faithfulness = self._faithfulness_check(answer, docs_dicts)
         completeness = self._completeness_check(answer)
 
-        return {
+        result = {
             "query": query,
             "retrieval_chunks": len(docs_dicts),
             "average_score": avg_score,
@@ -88,3 +93,7 @@ class RAGEvaluator:
             "faithfulness": faithfulness,
             "completeness": completeness,
         }
+        logger.info(f"Evaluation result: {result}")
+        return result
+
+evaluator = RAGEvaluator()

@@ -1,27 +1,31 @@
-import os
-import sys
-import subprocess
 import argparse
+import os
+import subprocess
+import sys
 import webbrowser
 from time import sleep
+
+from utils.logger import get_logger
+
+logger = get_logger()
 
 
 def check_dependencies():
     """Check if required dependencies are installed"""
     try:
         import fastapi
-        import streamlit
         import langchain
         import langgraph
         import openai
         import sqlalchemy
+        import streamlit
         import uvicorn
 
-        print("All required packages are installed.")
+        logger.info("All required packages are installed.")
         return True
     except ImportError as e:
-        print(f"Missing dependency: {e}")
-        print(
+        logger.error(f"Missing dependency: {e}")
+        logger.error(
             "Please install all required packages using: pip install -r requirements.txt"
         )
         return False
@@ -30,8 +34,10 @@ def check_dependencies():
 def check_env_file():
     """Check if .env file exists and has required variables"""
     if not os.path.exists(".env"):
-        print(".env file not found.")
-        print("Please copy .env.example to .env and update it with your details.")
+        logger.error(".env file not found.")
+        logger.error(
+            "Please copy .env.example to .env and update it with your details."
+        )
         return False
 
     with open(".env", "r") as f:
@@ -45,29 +51,31 @@ def check_env_file():
             missing_vars.append(var)
 
     if missing_vars:
-        print(f"Some environment variables are missing: {', '.join(missing_vars)}")
-        print("Please add them to your .env file and try again.")
+        logger.error(
+            f"Some environment variables are missing: {', '.join(missing_vars)}"
+        )
+        logger.error("Please add them to your .env file and try again.")
         return False
 
-    print("Environment setup looks fine.")
+    logger.info("Environment setup looks fine.")
     return True
 
 
 def start_backend(port=8000):
     """Start the FastAPI backend server"""
-    print(f"Starting FastAPI backend on port {port}...")
+    logger.info(f"Starting FastAPI backend on port {port}...")
 
     try:
         import socket
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             if s.connect_ex(("localhost", port)) == 0:
-                print(f"Port {port} is already being used by another process.")
+                logger.warning(f"Port {port} is already being used by another process.")
                 choice = input("Would you like to use port 8001 instead? (y/n): ")
                 if choice.lower() == "y":
                     port = 8001
                 else:
-                    print("Okay, stopping here.")
+                    logger.info("Okay, stopping here.")
                     sys.exit(1)
 
         cmd = [
@@ -86,33 +94,35 @@ def start_backend(port=8000):
             "run_app.py",
         ]
 
-        print(f"Backend is starting. You can access t at: http://localhost:{port}")
-        print("Press Ctrl+C anytime to stop the server.")
+        logger.info(
+            f"Backend is starting. You can access t at: http://localhost:{port}"
+        )
+        logger.info("Press Ctrl+C anytime to stop the server.")
 
         subprocess.run(cmd)
 
     except KeyboardInterrupt:
-        print("\nBackend stopped.")
+        logger.info("\nBackend stopped.")
     except Exception as e:
-        print(f"Error while starting backend: {e}")
+        logger.error(f"Error while starting backend: {e}")
         sys.exit(1)
 
 
 def start_frontend(port=8501):
     """Start the Streamlit frontend"""
-    print(f"Starting Streamlit frontend on port {port}...")
+    logger.info(f"Starting Streamlit frontend on port {port}...")
 
     try:
         import socket
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             if s.connect_ex(("localhost", port)) == 0:
-                print(f"Port {port} is already in use.")
+                logger.warning(f"Port {port} is already in use.")
                 choice = input("Would you like to switch to port 8502 instead? (y/n): ")
                 if choice.lower() == "y":
                     port = 8502
                 else:
-                    print("Stopping as requested.")
+                    logger.info("Stopping as requested.")
                     sys.exit(1)
 
         os.environ["STREAMLIT_SERVER_PORT"] = str(port)
@@ -130,24 +140,24 @@ def start_frontend(port=8501):
             "false",
         ]
 
-        print(
+        logger.info(
             f"Frontend is starting. Open this in your browser: http://localhost:{port}"
         )
-        print("Press Ctrl+C anytime to stop the frontend.")
+        logger.info("Press Ctrl+C anytime to stop the frontend.")
 
         subprocess.run(cmd)
 
     except KeyboardInterrupt:
-        print("\nFrontend stopped.")
+        logger.info("\nFrontend stopped.")
     except Exception as e:
-        print(f"Error while starting frontend: {e}")
+        logger.error(f"Error while starting frontend: {e}")
         sys.exit(1)
 
 
 def start_both(backend_port=8000, frontend_port=8501):
     """Start both backend and frontend"""
-    print("Starting RAG Application...")
-    print("=" * 50)
+    logger.info("Starting RAG Application...")
+    logger.info("=" * 50)
 
     if not check_dependencies():
         sys.exit(1)
@@ -155,7 +165,7 @@ def start_both(backend_port=8000, frontend_port=8501):
     if not check_env_file():
         sys.exit(1)
 
-    print("\nStarting backend and frontend services...")
+    logger.info("\nStarting backend and frontend services...")
 
     backend_process = subprocess.Popen(
         [
@@ -170,7 +180,7 @@ def start_both(backend_port=8000, frontend_port=8501):
         ]
     )
 
-    print(f"Waiting for backend to start on port {backend_port}...")
+    logger.info(f"Waiting for backend to start on port {backend_port}...")
     sleep(2)
 
     try:
@@ -195,18 +205,23 @@ def main():
     )
 
     parser.add_argument(
-        "--backend", action="store_true", help="Start only the FastAPI backend"
+        "-b", "--backend", action="store_true", help="Start only the FastAPI backend"
     )
     parser.add_argument(
-        "--frontend", action="store_true", help="Start only the Streamlit frontend"
+        "-f",
+        "--frontend",
+        action="store_true",
+        help="Start only the Streamlit frontend",
     )
     parser.add_argument(
+        "-bp",
         "--backend-port",
         type=int,
         default=8000,
         help="Port for backend server (default: 8000)",
     )
     parser.add_argument(
+        "-fp",
         "--frontend-port",
         type=int,
         default=8501,

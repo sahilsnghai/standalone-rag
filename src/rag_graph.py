@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
+from utils.logger import get_logger
+
+logger = get_logger()
+
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
 
 
 class RAGGraph:
@@ -90,9 +94,13 @@ Context:
 
         # If nothing retrieved, enforce "Not found in documents"
         if not context.strip():
+            logger.info(
+                "No context available for generation. Returning 'Not found in documents'."
+            )
             return {"answer": "Not found in documents", "prompt": ""}
 
         prompt = self._build_prompt(query=query, context=context)
+        logger.info(f"Generating answer for query: {query}")
 
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
         answer = (response.content or "").strip()
@@ -100,6 +108,11 @@ Context:
         # Hard guard: if model tries to answer without context
         if not answer:
             answer = "Not found in documents"
+            logger.warning(
+                "Empty response from LLM, defaulting to 'Not found in documents'"
+            )
 
+        logger.info(f"Generated answer length: {len(answer)}")
         return {"answer": answer, "prompt": prompt}
 
+rag_graph = RAGGraph()

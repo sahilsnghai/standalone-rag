@@ -1,6 +1,11 @@
-from langchain_core.documents import Document
 from typing import List, Optional
+
+from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
+
+from utils.logger import get_logger
+
+logger = get_logger()
 
 
 # class Reranker:
@@ -43,7 +48,7 @@ class Reranker:
         self,
         model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         top_k: int = 10,
-        device: Optional[str] = None, 
+        device: Optional[str] = None,
     ):
         self.top_k = top_k
         self.model = CrossEncoder(model_name, device=device)
@@ -52,7 +57,11 @@ class Reranker:
         if not docs:
             return []
 
+        logger.info(f"Reranking {len(docs)} documents for query: {query}")
         pairs = [(query, d.page_content) for d in docs]
-        scores = self.model.predict(pairs) 
+        scores = self.model.predict(pairs)
         ranked = sorted(zip(docs, scores), key=lambda x: float(x[1]), reverse=True)
-        return [d for d, _ in ranked[: self.top_k]]
+
+        reranked_docs = [d for d, _ in ranked[: self.top_k]]
+        logger.info(f"Reranked to {len(reranked_docs)} documents")
+        return reranked_docs

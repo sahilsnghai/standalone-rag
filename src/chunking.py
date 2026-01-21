@@ -1,13 +1,17 @@
-from utils.config import Config
-from typing import List
 import re
+from typing import List
+
+from utils.config import Config
+from utils.logger import get_logger
+
+logger = get_logger()
 
 from langchain_text_splitters import (
-    RecursiveCharacterTextSplitter,
     CharacterTextSplitter,
-    TokenTextSplitter,
     MarkdownHeaderTextSplitter,
     PythonCodeTextSplitter,
+    RecursiveCharacterTextSplitter,
+    TokenTextSplitter,
 )
 
 
@@ -100,15 +104,33 @@ class Chunker:
             return []
 
         if self._is_table(text):
-            return self._chunk_table(text)
+            logger.info("Chunking strategy: Table")
+            chunks = self._chunk_table(text)
+            logger.info(f"Generated {len(chunks)} chunks")
+            return chunks
 
         if self._is_markdown(text):
-            return self._chunk_markdown(text)
+            logger.info("Chunking strategy: Markdown")
+            chunks = self._chunk_markdown(text)
+            logger.info(f"Generated {len(chunks)} chunks")
+            return chunks
 
         if self._is_code(text):
-            return self._chunk_code(text)
+            logger.info("Chunking strategy: Code")
+            chunks = self._chunk_code(text)
+            logger.info(f"Generated {len(chunks)} chunks")
+            return chunks
 
         if self._is_long_text(text):
-            return self._chunk_long_text(text)
+            logger.info("Chunking strategy: Long Text")
+            chunks = self._chunk_long_text(text)
+            logger.info(f"Generated {len(chunks)} chunks")
+            return chunks
 
-        return self._chunk_default(text)
+        logger.info("Chunking strategy: Default")
+        chunks = self._chunk_default(text)
+        logger.info(f"Generated {len(chunks)} chunks")
+        return chunks
+
+
+chunker = Chunker()

@@ -10,12 +10,15 @@ creates the required tables on import and provides the same public API:
 import os
 import threading
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from .config import Config
+from .logger import get_logger
+
+logger = get_logger()
 
 # A simple thread‑safe connection wrapper. For a production system a connection
 # pool (e.g., ``psycopg2.pool.ThreadedConnectionPool``) would be preferable, but
@@ -34,31 +37,36 @@ def _get_connection():
 
 
 def _init_db():
-    conn = _get_connection()
-    cur = conn.cursor()
-    # Create chats table
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chats (
-            chat_id TEXT PRIMARY KEY,
-            created_at TIMESTAMPTZ NOT NULL
-        );
-        """
-    )
-    # Create qa table
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS qa (
-            id SERIAL PRIMARY KEY,
-            chat_id TEXT REFERENCES chats(chat_id) ON DELETE CASCADE,
-            question TEXT NOT NULL,
-            answer TEXT NOT NULL,
-            timestamp TIMESTAMPTZ NOT NULL
-        );
-        """
-    )
-    conn.commit()
-    cur.close()
+    try:
+        conn = _get_connection()
+        cur = conn.cursor()
+        # Create chats table
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chats (
+                chat_id TEXT PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL
+            );
+            """
+        )
+        # Create qa table
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qa (
+                id SERIAL PRIMARY KEY,
+                chat_id TEXT REFERENCES chats(chat_id) ON DELETE CASCADE,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                timestamp TIMESTAMPTZ NOT NULL
+            );
+            """
+        )
+        conn.commit()
+        cur.close()
+        logger.info("Initialized legacy DB tables")
+    except Exception as e:
+        logger.error(f"Error initializing legacy DB: {e}")
+        raise
 
 
 # Initialise tables when the module is imported.
@@ -67,35 +75,45 @@ _init_db()
 
 def add_chat(chat_id: str) -> None:
     """Create a new chat entry if it does not already exist."""
-    conn = _get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO chats (chat_id, created_at)
-        VALUES (%s, %s)
-        ON CONFLICT (chat_id) DO NOTHING;
-        """,
-        (chat_id, datetime.utcnow()),
-    )
-    conn.commit()
-    cur.close()
+    try:
+        conn = _get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO chats (chat_id, created_at)
+            VALUES (%s, %s)
+            ON CONFLICT (chat_id) DO NOTHING;
+            """,
+            (chat_id, datetime.utcnow()),
+        )
+        conn.commit()
+        cur.close()
+        logger.info(f"Added chat (legacy): {chat_id}")
+    except Exception as e:
+        logger.error(f"Error adding chat (legacy): {e}")
+        raise
 
 
 def add_qa(chat_id: str, question: str, answer: str) -> None:
     """Append a question‑answer pair to the specified chat."""
-    # Ensure the chat exists.
-    add_chat(chat_id)
-    conn = _get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO qa (chat_id, question, answer, timestamp)
-        VALUES (%s, %s, %s, %s);
-        """,
-        (chat_id, question, answer, datetime.utcnow()),
-    )
-    conn.commit()
-    cur.close()
+    try:
+        # Ensure the chat exists.
+        add_chat(chat_id)
+        conn = _get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO qa (chat_id, question, answer, timestamp)
+            VALUES (%s, %s, %s, %s);
+            """,
+            (chat_id, question, answer, datetime.utcnow()),
+        )
+        conn.commit()
+        cur.close()
+        logger.info(f"Added QA to chat (legacy): {chat_id}")
+    except Exception as e:
+        logger.error(f"Error adding QA (legacy): {e}")
+        raise
 
 
 def list_chats(page: int = 1, page_size: int = 5) -> List[Dict[str, Any]]:
@@ -108,41 +126,46 @@ def list_chats(page: int = 1, page_size: int = 5) -> List[Dict[str, Any]]:
     page_size: int
         Number of chats per page.
     """
-    conn = _get_connection()
-    cur = conn.cursor()
-    offset = (page - 1) * page_size
-    cur.execute(
-        """
-        SELECT chat_id, created_at
-        FROM chats
-        ORDER BY chat_id
-        LIMIT %s OFFSET %s;
-        """,
-        (page_size, offset),
-    )
-    chats = cur.fetchall()
-    result: List[Dict[str, Any]] = []
-    for chat in chats:
+    try:
+        conn = _get_connection()
+        cur = conn.cursor()
+        offset = (page - 1) * page_size
         cur.execute(
             """
-            SELECT question, answer, timestamp
-            FROM qa
-            WHERE chat_id = %s
-            ORDER BY timestamp DESC
-            LIMIT 5;
+            SELECT chat_id, created_at
+            FROM chats
+            ORDER BY chat_id
+            LIMIT %s OFFSET %s;
             """,
-            (chat["chat_id"],),
+            (page_size, offset),
         )
-        recent_qa = cur.fetchall()
-        # Convert timestamps to ISO‑8601 strings for consistency with the JSON version.
-        for qa in recent_qa:
-            qa["timestamp"] = qa["timestamp"].isoformat() + "Z"
-        result.append(
-            {
-                "chat_id": chat["chat_id"],
-                "created_at": chat["created_at"].isoformat() + "Z",
-                "qa": recent_qa,
-            }
-        )
-    cur.close()
-    return result
+        chats = cur.fetchall()
+        result: List[Dict[str, Any]] = []
+        for chat in chats:
+            cur.execute(
+                """
+                SELECT question, answer, timestamp
+                FROM qa
+                WHERE chat_id = %s
+                ORDER BY timestamp DESC
+                LIMIT 5;
+                """,
+                (chat["chat_id"],),
+            )
+            recent_qa = cur.fetchall()
+            # Convert timestamps to ISO‑8601 strings for consistency with the JSON version.
+            for qa in recent_qa:
+                qa["timestamp"] = qa["timestamp"].isoformat() + "Z"
+            result.append(
+                {
+                    "chat_id": chat["chat_id"],
+                    "created_at": chat["created_at"].isoformat() + "Z",
+                    "qa": recent_qa,
+                }
+            )
+        cur.close()
+        logger.info(f"Listed {len(result)} chats (legacy)")
+        return result
+    except Exception as e:
+        logger.error(f"Error listing chats (legacy): {e}")
+        raise

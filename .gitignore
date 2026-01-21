@@ -13,3 +13,7 @@ wheels/
 # Data
 data/
 figures/
+models/
+
+.logs
+.agent

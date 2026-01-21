@@ -1,9 +1,13 @@
 from typing import List, Optional
+
 from langchain_core.documents import Document
+from qdrant_client.models import ScoredPoint
 
 from src.reranker import Reranker
 from utils.config import Config
-from qdrant_client.models import ScoredPoint
+from utils.logger import get_logger
+
+logger = get_logger()
 
 
 class RetrievalPipeline:
@@ -22,34 +26,33 @@ class RetrievalPipeline:
         self.reranker = Reranker()
 
     async def retrieve(self, query: str) -> List[Document]:
-        if not self.retrieves:
-            return []
+        try:
+            logger.info(f"Starting retrieval pipeline for query: '{query}'")
+            if not self.retrieves:
+                logger.warning("No retrieval results to process.")
+                return []
 
-        # for _, r in self.retrieves:
-        #     for i in r:
-        #         r: List[ScoredPoint]
-        #         print(f"{r=}")
+            candidate_docs: List[Document] = [
+                Document(
+                    page_content=(i.payload or {}).get("text") or "",
+                    metadata={
+                        **{k: v for k, v in (i.payload or {}).items() if k != "text"},
+                        "score": i.score,
+                        "id": i.id,
+                    },
+                )
+                for _, r in self.retrieves  # unpack (_, r)
+                for i in r  # iterate List[ScoredPoint]
+            ]
 
-        #         print(f"{i.id=}")
-        #         print(f"{i.score=}")
-        #         print(f"{i.payload.get("text")=}")
-        #         print(f"{i.payload.get("metadata")=}")
-        #         print(f"{i.payload.get("file_name")=}")
+            logger.info(f"Candidate docs constructed: {len(candidate_docs)} docs")
+            logger.info(f"Candidate docs: {candidate_docs}")
 
-        candidate_docs: List[Document] = [
-            Document(
-                page_content=(i.payload or {}).get("text") or "",
-                metadata={
-                    **{k: v for k, v in (i.payload or {}).items() if k != "text"},
-                    "score": i.score,
-                    "id": i.id,
-                },
-            )
-            for _, r in self.retrieves  # unpack (_, r)
-            for i in r  # iterate List[ScoredPoint]
-        ]
+            logger.info("Starting reranking...")
+            reranked_docs = self.reranker.rerank(query, candidate_docs)
+            logger.info(f"Reranking complete. Top {self.top_k} docs selected.")
 
-        print(f"{candidate_docs = }")
-
-        reranked_docs = self.reranker.rerank(query, candidate_docs)
-        return reranked_docs[: self.top_k]
+            return reranked_docs[: self.top_k]
+        except Exception as e:
+            logger.error(f"Error in retrieve: {e}")
+            raise
