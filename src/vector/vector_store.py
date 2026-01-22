@@ -3,13 +3,12 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, List
 
-from src.embedding import EmbeddingModel
+from src.vector.embedding import EmbeddingModel, embedder
 from utils.logger import get_logger
 
 logger = get_logger()
 
 from qdrant_client import AsyncQdrantClient
-from src.embedding import embedder
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 

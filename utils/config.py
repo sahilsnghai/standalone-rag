@@ -27,4 +27,6 @@ class Config:
     MAX_DOC_DISPLAY = int(os.getenv("MAX_DOC_DISPLAY", "5"))
 
     DEBUG = bool(os.getenv("DEBUG", False))
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 

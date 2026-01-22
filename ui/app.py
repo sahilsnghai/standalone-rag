@@ -1,10 +1,12 @@
 import hashlib
 import time
-
 import requests
 import streamlit as st
+import json
 
 from utils.logger import get_logger
+from tenacity import retry, stop_after_attempt, retry_if_exception_type, wait_incrementing
+
 
 logger = get_logger()
 
@@ -29,13 +31,23 @@ def format_file_size(size):
         return f"{size / (1024 ** 2):.2f} MB"
 
 
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_incrementing(1),
+    retry=retry_if_exception_type(requests.RequestException),
+    reraise=True,
+)
+def _health_request() -> bool:
+    r = requests.get(f"{API_URL}/health", timeout=3)
+    return r.status_code == 200
+
+
 @st.cache_data(ttl=2)
 def cached_health() -> bool:
     try:
-        r = requests.get(f"{API_URL}/health", timeout=3)
-        return r.status_code == 200
-    except requests.RequestException as e:
-        logger.error(f"Health check failed: {e}")
+        return _health_request()
+    except Exception as e:
+        logger.error(f"Health check failed after retries: {e}")
         return False
 
 
@@ -108,10 +120,12 @@ def upload_file(chat_id: str, file):
     try:
         logger.info(f"Initiating upload_file for chat {chat_id}, file: {file.name}")
         files = {"file": (file.name, file.getvalue())}
-        result = requests.post(f"{API_URL}/upload/{chat_id}", files=files, timeout=300)
-        result.raise_for_status()
+        resp = requests.post(f"{API_URL}/upload/{chat_id}", files=files, timeout=300)
+        resp.raise_for_status()
         st.cache_data.clear()
+        result = resp.json()
         logger.info(f"Uploaded file {file.name} to chat {chat_id}")
+        return result
     except Exception as e:
         logger.error(f"Backend error in upload_file: {e}")
         st.error(f"Backend error: {e}")
@@ -148,7 +162,8 @@ def init_state():
     st.session_state.setdefault("chat_id", None)
     st.session_state.setdefault("uploaded_fingerprints", set())
     st.session_state.setdefault("uploader_key", 0)
-    st.session_state.setdefault("messages_by_chat", {}) 
+    st.session_state.setdefault("messages_by_chat", {})
+    st.session_state.setdefault("uploading_docs", False)
 
 
 def ensure_default_chat_selected(chats):
@@ -223,28 +238,198 @@ def render_sidebar(chats):
                 st.rerun()
 
 
+def show_upload_progress(result: dict, api_base_url: str = API_URL, *, timeout: int = 300):
+    """
+    Streamlit progress UI driven by your SSE format:
+
+      event: <event_name>
+      data: {"progress": 10, "message": "..."}   (JSON)
+      (blank line)
+
+    Notes:
+    - `result` must contain `sse_url` (relative or absolute)
+    - Progress keys supported in JSON data: progress|percent|pct
+    - Message keys supported: message|status|detail
+    - Auto-completes when progress>=100 or state/done flags indicate completion
+    - UI vanishes once complete
+    """
+    sse_path = (result or {}).get("sse_url")
+    if not sse_path:
+        logger.info("No SSE URL found in the upload result — skipping progress UI.")
+        st.session_state.uploading_docs = False
+        return
+
+    # CHANGED: robust join to support leading "/" in sse_path and avoid double slashes
+    sse_url = f"{api_base_url.rstrip('/')}/{str(sse_path).lstrip('/')}"
+
+    fname = (result or {}).get("file") or ""
+    logger.info(
+        "Starting upload progress stream%s. SSE: %s",
+        f" for '{fname}'" if fname else "",
+        sse_url,
+    )
+
+    container = st.container()
+    with container:
+        if fname:
+            st.caption(f"Processing: {fname}")
+        bar = st.progress(0, text="Processing...")
+        # CHANGED: remove JSON box entirely
+        status_box = None
+
+    def _clamp(x: int) -> int:
+        return max(0, min(100, x))
+
+    def _iter_sse(url: str):
+        logger.debug("Opening SSE connection…")
+        with requests.get(url, stream=True, timeout=timeout) as r:
+            r.raise_for_status()
+            logger.debug("SSE connection established (HTTP %s).", r.status_code)
+
+            buf = ""
+            event_name = None
+            data_lines = []
+
+            for chunk in r.iter_content(chunk_size=1024, decode_unicode=True):
+                if not chunk:
+                    continue
+                buf += chunk
+
+                while "\n\n" in buf:
+                    raw_event, buf = buf.split("\n\n", 1)
+
+                    event_name = None
+                    data_lines = []
+
+                    for line in raw_event.splitlines():
+                        if line.startswith("event:"):
+                            event_name = line[len("event:"):].strip()
+                        elif line.startswith("data:"):
+                            data_lines.append(line[len("data:"):].lstrip())
+
+                    data_str = "\n".join(data_lines) if data_lines else ""
+                    yield event_name, data_str
+
+    def _extract_progress_and_msg(payload: dict):
+        p = payload.get("progress", payload.get("percent", payload.get("pct")))
+        msg = payload.get("message", payload.get("status", payload.get("detail")))
+
+        prog = None
+        if p is not None:
+            try:
+                prog = int(float(p))
+            except Exception:
+                prog = None
+
+        message = msg if isinstance(msg, str) and msg.strip() else None
+
+        state = str(payload.get("state", "")).lower()
+        done_flag = payload.get("done", payload.get("completed", payload.get("finished")))
+        done = bool(done_flag) or state in {"done", "completed", "finished", "success", "succeeded"}
+
+        if prog is not None and prog >= 100:
+            done = True
+
+        return prog, message, done
+
+    last_p = 0
+    last_msg = "Processing..."
+    st.session_state.uploading_docs = True
+
+    try:
+        for event_name, data_str in _iter_sse(sse_url):
+            st.session_state.uploading_docs = True
+
+            if not data_str:
+                logger.debug("Received SSE event '%s' with no data — ignoring.", event_name)
+                continue
+
+            try:
+                payload = json.loads(data_str)
+            except Exception:
+                logger.warning(
+                    "Got a progress update, but it wasn’t valid JSON. Event=%s Data=%r",
+                    event_name,
+                    data_str,
+                )
+                # CHANGED: do not render JSON to UI
+                continue
+
+            prog, message, done = _extract_progress_and_msg(payload)
+
+            if prog is not None:
+                last_p = prog
+            if message is not None:
+                last_msg = message
+            elif event_name:
+                last_msg = event_name
+
+            if prog is not None:
+                logger.info("Still working… %s%% — %s", _clamp(last_p), last_msg)
+            else:
+                logger.info("Still working… %s", last_msg)
+
+            bar.progress(_clamp(last_p), text=last_msg)
+            # CHANGED: remove JSON rendering entirely (status_box unused)
+
+            if done:
+                logger.info("All done — wrapping things up.")
+                break
+
+        bar.progress(100, text="Complete ✅")
+        logger.info("Progress UI completed successfully.")
+        time.sleep(0.35)
+
+    except Exception as e:
+        logger.exception("Progress stream ran into a problem: %s", e)
+        # CHANGED: no JSON/status box; show error normally
+        st.error(f"Progress stream error: {e}")
+        time.sleep(0.75)
+
+    finally:
+        # CHANGED: ensure uploader returns after progress finishes (fixes "stuck" + double sections on rerun)
+        st.session_state.uploading_docs = False
+        container.empty()
+        logger.debug("Progress UI cleared.")
+
+
 def render_documents_panel(chat_id: str):
     with st.container():
         left, right = st.columns([1, 3], vertical_alignment="center")
 
-        with left:
-            st.subheader("📎 Documents")
+        if not st.session_state.uploading_docs:
+            with left:
+                st.subheader("📎 Documents")
 
         with right:
-            uploader_key = f"file_uploader_{st.session_state.uploader_key}"
-            uploaded = st.file_uploader(
-                "Upload document",
-                label_visibility="collapsed",
-                type=["txt", "pdf", "docx"],
-                key=uploader_key,
-            )
+            slot = st.empty()
+
+            if st.session_state.uploading_docs:
+                with slot.container():
+                    st.info("Upload in progress… hang tight 🙂")
+                    st.spinner("Processing…")
+                uploaded = None
+            else:
+                with slot.container():
+                    uploader_key = f"file_uploader_{st.session_state.uploader_key}"
+                    uploaded = st.file_uploader(
+                        "Upload document",
+                        label_visibility="collapsed",
+                        type=["txt", "pdf", "docx"],
+                        key=uploader_key,
+                    )
 
             if uploaded:
                 fp = file_fingerprint(uploaded)
                 if fp not in st.session_state.uploaded_fingerprints:
                     st.session_state.uploaded_fingerprints.add(fp)
-                    upload_file(chat_id, uploaded)
+                    st.session_state.uploading_docs = True  # CHANGED: flip immediately so uploader disappears right away
+                    slot.empty()  # CHANGED: clear uploader UI instantly (prevents double section during this run)
+
+                    result = upload_file(chat_id, uploaded)
                     st.success(f"Uploaded {uploaded.name}")
+                    logger.info(f"-----> {result = }")
+                    show_upload_progress(result=result)
 
                 st.session_state.uploader_key += 1
                 st.rerun()

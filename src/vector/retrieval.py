@@ -3,7 +3,7 @@ from typing import List, Optional
 from langchain_core.documents import Document
 from qdrant_client.models import ScoredPoint
 
-from src.reranker import Reranker
+from src.vector import Reranker
 from utils.config import Config
 from utils.logger import get_logger
 
@@ -56,3 +56,6 @@ class RetrievalPipeline:
         except Exception as e:
             logger.error(f"Error in retrieve: {e}")
             raise
+
+
+
