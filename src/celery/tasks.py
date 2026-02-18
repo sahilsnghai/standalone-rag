@@ -127,14 +127,14 @@ def process_upload_task(
         db = SyncSessionLocal()
         try:
             logger.info("Saving file metadata to DB")
-            async_to_sync(save_chat_file(
+            save_chat_file(
                 db,
                 chat_id=chat_id,
                 file_name=file_name,
                 file_path=str(tmp_path),
                 file_type=suffix[1:],
                 file_size=str(len(file_bytes)),
-            ))
+            )
             db.commit()
         except Exception:
             db.rollback()
@@ -160,6 +160,8 @@ def process_upload_task(
             )
 
         async_to_sync(_vector_ops)()
+        _set_progress(self, 92, "saving database")
+
 
         logger.info(
             "Task completed successfully | chat_id=%s file=%s chunks=%d",

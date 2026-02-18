@@ -1,4 +1,5 @@
 import os
+import warnings
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -6,8 +7,9 @@ load_dotenv()
 
 
 class Config:
-    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/rag_db")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost/rag_db")
     VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", "./vector_db")
 
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
@@ -30,3 +32,47 @@ class Config:
     CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
     CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 
+    JINA_API_KEY = os.getenv("JINA_API_KEY")
+    RERANKER_BACKEND = os.getenv("RERANKER_BACKEND", "jina")
+
+    @classmethod
+    def validate_and_warn(cls):
+        if not cls.OPENAI_API_KEY:
+            warnings.warn(
+                "⚠️  OPENAI_API_KEY not set!\n"
+                "   Set OPENAI_API_KEY environment variable to use OpenAI embeddings.\n"
+                "   Currently using: all-MiniLM-L6-v2 (local model)",
+                UserWarning,
+                stacklevel=2
+            )
+        
+        if cls.DATABASE_URL == "postgresql://localhost/rag_db":
+            warnings.warn(
+                "⚠️  Using default PostgreSQL connection: postgresql://localhost/rag_db\n"
+                "   Set DATABASE_URL environment variable for production.\n"
+                "   Make sure PostgreSQL server is running on localhost:5432",
+                UserWarning,
+                stacklevel=2
+            )
+        
+        if cls.EMBEDDING_MODEL in {"all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2"}:
+            import torch
+            msg = (
+                f"⚠️  Using embedding model: {cls.EMBEDDING_MODEL}\n"
+                f"   Model will be downloaded (~90MB) on first use.\n"
+            )
+            
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.get_device_properties(0)
+                    torch.cuda.synchronize()
+                    msg += "   GPU detected: CUDA operations will use GPU ✓"
+                except RuntimeError:
+                    msg += "   GPU detected but CUDA not compatible: Will fallback to CPU (slower) ⚠️"
+            else:
+                msg += "   GPU NOT detected: Will use CPU (slower) ⚠️"
+            
+            warnings.warn(msg, UserWarning, stacklevel=2)
+
+
+Config.validate_and_warn()

@@ -6,10 +6,11 @@ from typing import Optional
 from utils.config import Config
 
 class LoggerManager:
-    """Centralized logging manager for the application."""
+    """Centralized logging manager with module prefixes."""
 
     _instance: Optional["LoggerManager"] = None
     _logger: Optional[logging.Logger] = None
+    _module_loggers: dict = {}
 
     def __new__(cls):
         if cls._instance is None:
@@ -22,7 +23,7 @@ class LoggerManager:
             self._setup_logger()
 
     def _setup_logger(self):
-        self._logger = logging.getLogger("Rag_application")
+        self._logger = logging.getLogger("rag")
 
         if getattr(Config, "DEBUG", False):
             self._logger.setLevel(logging.DEBUG)
@@ -48,7 +49,7 @@ class LoggerManager:
         LOG_DIR = os.path.join(BASE_DIR, ".logs")
         os.makedirs(LOG_DIR, exist_ok=True)
 
-        log_file_path = os.path.join(LOG_DIR, "Rag_application.log")
+        log_file_path = os.path.join(LOG_DIR, "rag.log")
         file_handler = logging.FileHandler(log_file_path)
         if getattr(Config, "DEBUG", False):
             file_handler.setLevel(logging.INFO)
@@ -64,32 +65,112 @@ class LoggerManager:
         self._logger.info("Logger initialized")
         self._logger.info(f"Debug mode: {getattr(Config, 'DEBUG', False)}")
 
-    def get_logger(self, name: Optional[str] = None) -> logging.Logger:
+    def get_logger(
+        self,
+        name: Optional[str] = None,
+        prefix: Optional[str] = None,
+        suffix: Optional[str] = None,
+    ) -> logging.Logger:
+        """
+        Get a logger with optional prefix/suffix.
+        
+        Args:
+            name: Module name (e.g., 'vector_store')
+            prefix: Prefix for logs (e.g., '[UI]', '[DB]', '[API]')
+            suffix: Suffix for logs (e.g., '[WORKER]', '[SYNC]')
+        
+        Examples:
+            get_logger()  # Default root logger
+            get_logger(name="embedding")  # rag.embedding logger
+            get_logger(prefix="[UI]")  # Root logger with [UI] prefix
+            get_logger(name="db", prefix="[DATABASE]")  # rag.db with prefix
+            get_logger(name="tasks", prefix="[CELERY]", suffix="[ASYNC]")
+        """
         if self._logger is None:
             self._setup_logger()
 
-        if name:
-            return logging.getLogger(f"Rag_application.{name}")
-        return self._logger
+        cache_key = (name, prefix, suffix)
+        
+        if cache_key in self._module_loggers:
+            return self._module_loggers[cache_key]
 
-    def debug(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
+        if name:
+            base_name = f"rag.{name}"
+        else:
+            base_name = "rag"
+
+        logger = logging.getLogger(base_name)
+
+        if prefix or suffix:
+            logger = self._wrap_logger_with_prefix_suffix(
+                logger, prefix, suffix
+            )
+
+        self._module_loggers[cache_key] = logger
+        return logger
+
+    def _wrap_logger_with_prefix_suffix(
+        self, logger: logging.Logger, prefix: Optional[str], suffix: Optional[str]
+    ) -> logging.Logger:
+        """Wrap logger to add prefix/suffix to all messages."""
+        
+        class PrefixSuffixAdapter(logging.LoggerAdapter):
+            def process(self, msg, kwargs):
+                prefix_str = prefix or ""
+                suffix_str = suffix or ""
+                formatted_msg = f"{prefix_str} - {msg} {suffix_str}".strip()
+                return formatted_msg, kwargs
+
+        return PrefixSuffixAdapter(logger, {})
+
+    def debug(
+        self,
+        message: str,
+        name: Optional[str] = None,
+        prefix: Optional[str] = None,
+        suffix: Optional[str] = None,
+    ):
+        logger = self.get_logger(name, prefix, suffix)
         logger.debug(message)
 
-    def info(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
+    def info(
+        self,
+        message: str,
+        name: Optional[str] = None,
+        prefix: Optional[str] = None,
+        suffix: Optional[str] = None,
+    ):
+        logger = self.get_logger(name, prefix, suffix)
         logger.info(message)
 
-    def warning(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
+    def warning(
+        self,
+        message: str,
+        name: Optional[str] = None,
+        prefix: Optional[str] = None,
+        suffix: Optional[str] = None,
+    ):
+        logger = self.get_logger(name, prefix, suffix)
         logger.warning(message)
 
-    def error(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
+    def error(
+        self,
+        message: str,
+        name: Optional[str] = None,
+        prefix: Optional[str] = None,
+        suffix: Optional[str] = None,
+    ):
+        logger = self.get_logger(name, prefix, suffix)
         logger.error(message)
 
-    def critical(self, message: str, name: Optional[str] = None):
-        logger = self.get_logger(name)
+    def critical(
+        self,
+        message: str,
+        name: Optional[str] = None,
+        prefix: Optional[str] = None,
+        suffix: Optional[str] = None,
+    ):
+        logger = self.get_logger(name, prefix, suffix)
         logger.critical(message)
 
 
@@ -97,25 +178,78 @@ class LoggerManager:
 logger_manager = LoggerManager()
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
-    return logger_manager.get_logger(name)
+def get_logger(
+    name: Optional[str] = None,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+) -> logging.Logger:
+    """
+    Get a logger with optional prefix/suffix.
+    
+    Args:
+        name: Module name (e.g., 'vector_store', 'database')
+        prefix: Prefix for logs (e.g., '[UI]', '[DB]', '[API]')
+        suffix: Suffix for logs (e.g., '[WORKER]', '[SYNC]')
+    
+    Examples:
+        # Default logger
+        logger = get_logger()
+        
+        # With module name
+        logger = get_logger(name="embedding")
+        
+        # With prefix
+        logger = get_logger(prefix="[UI]")
+        
+        # With both
+        logger = get_logger(name="database", prefix="[DB]")
+        
+        # With prefix and suffix
+        logger = get_logger(name="tasks", prefix="[CELERY]", suffix="[ASYNC]")
+    """
+    return logger_manager.get_logger(name, prefix, suffix)
 
 
-def debug(message: str, name: Optional[str] = None):
-    logger_manager.debug(message, name)
+def debug(
+    message: str,
+    name: Optional[str] = None,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+):
+    logger_manager.debug(message, name, prefix, suffix)
 
 
-def info(message: str, name: Optional[str] = None):
-    logger_manager.info(message, name)
+def info(
+    message: str,
+    name: Optional[str] = None,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+):
+    logger_manager.info(message, name, prefix, suffix)
 
 
-def warning(message: str, name: Optional[str] = None):
-    logger_manager.warning(message, name)
+def warning(
+    message: str,
+    name: Optional[str] = None,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+):
+    logger_manager.warning(message, name, prefix, suffix)
 
 
-def error(message: str, name: Optional[str] = None):
-    logger_manager.error(message, name)
+def error(
+    message: str,
+    name: Optional[str] = None,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+):
+    logger_manager.error(message, name, prefix, suffix)
 
 
-def critical(message: str, name: Optional[str] = None):
-    logger_manager.critical(message, name)
+def critical(
+    message: str,
+    name: Optional[str] = None,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+):
+    logger_manager.critical(message, name, prefix, suffix)

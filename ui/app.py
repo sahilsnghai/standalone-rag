@@ -8,7 +8,7 @@ from utils.logger import get_logger
 from tenacity import retry, stop_after_attempt, retry_if_exception_type, wait_incrementing
 
 
-logger = get_logger()
+logger = get_logger(prefix="[UI]")
 
 API_URL = "http://localhost:8000"
 
@@ -16,7 +16,9 @@ API_URL = "http://localhost:8000"
 def file_fingerprint(uploaded) -> str:
     data = uploaded.getvalue()
     h = hashlib.sha256(data).hexdigest()
-    return f"{uploaded.name}:{len(data)}:{h}"
+    fingerprint = f"{uploaded.name}:{len(data)}:{h}"
+    logger.debug(f"Generated fingerprint for {uploaded.name}: {fingerprint}")
+    return fingerprint
 
 
 def format_file_size(size):
@@ -33,52 +35,67 @@ def format_file_size(size):
 
 @retry(
     stop=stop_after_attempt(5),
-    wait=wait_incrementing(1),
+    wait=wait_incrementing(0.5),
     retry=retry_if_exception_type(requests.RequestException),
     reraise=True,
 )
 def _health_request() -> bool:
+    logger.debug("Attempting health check request")
     r = requests.get(f"{API_URL}/health", timeout=3)
+    logger.debug(f"Health check response: {r.status_code}")
     return r.status_code == 200
 
 
-@st.cache_data(ttl=2)
+@st.cache_data(ttl=0)
 def cached_health() -> bool:
     try:
-        return _health_request()
+        logger.info("Running cached health check")
+        result = _health_request()
+        logger.info(f"Health check result: {result}")
+        return result
     except Exception as e:
         logger.error(f"Health check failed after retries: {e}")
         return False
 
 
-@st.cache_data(ttl=1.5)
+@st.cache_data(ttl=0)
 def cached_fetch_chats():
     try:
+        logger.info("Fetching chats from API")
         r = requests.get(f"{API_URL}/chats", timeout=5)
         r.raise_for_status()
-        return r.json()
+        chats = r.json()
+        logger.info(f"Successfully fetched {len(chats)} chats")
+        return chats
     except Exception as e:
         logger.error(f"Error fetching chats: {e}")
         return []
 
 
-@st.cache_data(ttl=1.5)
+@st.cache_data(ttl=0)
 def cached_fetch_history(chat_id: str):
     try:
+        logger.info(f"Fetching history for chat_id: {chat_id}")
         r = requests.get(f"{API_URL}/chats/{chat_id}/history", timeout=10)
         r.raise_for_status()
-        return r.json()
+        history = r.json()
+        logger.info(f"Successfully fetched {len(history)} messages for chat {chat_id}")
+        return history
     except Exception as e:
         logger.error(f"Error fetching history for chat {chat_id}: {e}")
         return []
 
 
-@st.cache_data(ttl=1.5)
+@st.cache_data(ttl=0)
 def cached_fetch_uploaded_files(chat_id: str):
     try:
+        logger.info(f"Fetching uploaded files for chat_id: {chat_id}")
         r = requests.get(f"{API_URL}/chats/{chat_id}/files", timeout=10)
         if r.status_code == 200:
-            return r.json()
+            files = r.json()
+            logger.info(f"Successfully fetched {len(files)} files for chat {chat_id}")
+            return files
+        logger.warning(f"Non-200 status code when fetching files: {r.status_code}")
         return []
     except Exception as e:
         logger.error(f"Error fetching files for chat {chat_id}: {e}")
@@ -87,16 +104,17 @@ def cached_fetch_uploaded_files(chat_id: str):
 
 def create_chat(chat_name: str):
     try:
-        logger.info(f"Initiating create_chat with name: {chat_name}")
+        logger.info(f"Creating new chat with name: {chat_name}")
         result = requests.post(
             f"{API_URL}/chats",
             params={"chat_name": chat_name},
             timeout=10,
         )
         result.raise_for_status()
+        chat_data = result.json()
+        logger.info(f"Successfully created chat: {chat_name} (ID: {chat_data.get('id')})")
         st.cache_data.clear()
-        logger.info(f"Created chat: {chat_name}")
-        return result.json()
+        return chat_data
     except Exception as e:
         logger.error(f"Backend error in create_chat: {e}")
         st.error(f"Backend error: {e}")
@@ -105,11 +123,11 @@ def create_chat(chat_name: str):
 
 def delete_chat(chat_id: str):
     try:
-        logger.info(f"Initiating delete_chat for id: {chat_id}")
+        logger.info(f"Deleting chat with id: {chat_id}")
         result = requests.delete(f"{API_URL}/chats/{chat_id}", timeout=10)
         result.raise_for_status()
+        logger.info(f"Successfully deleted chat: {chat_id}")
         st.cache_data.clear()
-        logger.info(f"Deleted chat: {chat_id}")
         st.success("Chat deleted")
     except Exception as e:
         logger.error(f"Error deleting chat {chat_id}: {e}")
@@ -118,13 +136,14 @@ def delete_chat(chat_id: str):
 
 def upload_file(chat_id: str, file):
     try:
-        logger.info(f"Initiating upload_file for chat {chat_id}, file: {file.name}")
+        logger.info(f"Starting file upload - chat_id: {chat_id}, file: {file.name}, size: {format_file_size(file.size)}")
         files = {"file": (file.name, file.getvalue())}
         resp = requests.post(f"{API_URL}/upload/{chat_id}", files=files, timeout=300)
         resp.raise_for_status()
-        st.cache_data.clear()
         result = resp.json()
-        logger.info(f"Uploaded file {file.name} to chat {chat_id}")
+        logger.info(f"File upload successful - {file.name} to chat {chat_id}")
+        logger.debug(f"Upload response: {result}")
+        st.cache_data.clear()
         return result
     except Exception as e:
         logger.error(f"Backend error in upload_file: {e}")
@@ -133,16 +152,19 @@ def upload_file(chat_id: str, file):
 
 def ask_question(chat_id: str, query: str):
     try:
-        logger.info(f"Initiating ask_question for chat {chat_id} with query: {query}")
+        logger.info(f"Processing query for chat {chat_id}")
+        logger.debug(f"Query text: {query[:100]}...")
         result = requests.post(
             f"{API_URL}/query",
             json={"chat_id": chat_id, "query": query},
             timeout=300,
         )
         result.raise_for_status()
+        response = result.json()
+        logger.info(f"Query processed successfully for chat {chat_id}")
+        logger.debug(f"Response: {response}")
         st.cache_data.clear()
-        logger.info(f"Asked question in chat {chat_id}: {query}")
-        return result.json()
+        return response
     except Exception as e:
         logger.error(f"Backend error in ask_question: {e}")
         st.error(f"Backend error: {e}")
@@ -150,25 +172,33 @@ def ask_question(chat_id: str, query: str):
 
 
 def typewriter(text: str, speed: float = 0.015):
+    logger.debug(f"Starting typewriter animation with {len(text)} characters")
     box = st.empty()
     out = ""
     for ch in text:
         out += ch
         box.markdown(out)
         time.sleep(speed)
+    logger.debug("Typewriter animation completed")
 
 
 def init_state():
+    logger.debug("Initializing session state")
     st.session_state.setdefault("chat_id", None)
     st.session_state.setdefault("uploaded_fingerprints", set())
     st.session_state.setdefault("uploader_key", 0)
     st.session_state.setdefault("messages_by_chat", {})
     st.session_state.setdefault("uploading_docs", False)
+    logger.debug("Session state initialized")
 
 
 def ensure_default_chat_selected(chats):
     if st.session_state.chat_id is None:
-        st.session_state.chat_id = chats[0]["id"] if chats else None
+        if chats:
+            st.session_state.chat_id = chats[0]["id"]
+            logger.info(f"Default chat selected: {chats[0].get('chat_name', 'Unknown')}")
+        else:
+            logger.warning("No chats available for default selection")
 
 
 def load_messages_once(chat_id: str):
@@ -177,14 +207,19 @@ def load_messages_once(chat_id: str):
     Prevents duplicated rendering and removes the need for a separate 'messages' list.
     """
     if chat_id not in st.session_state.messages_by_chat:
+        logger.info(f"Loading message history for chat {chat_id}")
         history = cached_fetch_history(chat_id) or []
         st.session_state.messages_by_chat[chat_id] = [
             {"role": m.get("role", "assistant"), "content": m.get("content", "")}
             for m in history
         ]
+        logger.info(f"Loaded {len(history)} messages for chat {chat_id}")
+    else:
+        logger.debug(f"Messages already loaded for chat {chat_id}, using cached")
 
 
 def render_sidebar(chats):
+    logger.debug("Rendering sidebar")
     st.sidebar.title("💬 Chats")
 
     chat_name_input = st.sidebar.text_input(
@@ -194,18 +229,22 @@ def render_sidebar(chats):
     )
 
     if st.sidebar.button("New Chat", icon="➕", use_container_width=True):
+        logger.info(f"New Chat button clicked with name: {chat_name_input}")
         chat = create_chat(chat_name_input)
         if chat:
             st.session_state.chat_id = chat["id"]
             st.session_state.messages_by_chat.pop(chat["id"], None)
+            logger.info(f"New chat created and selected: {chat['id']}")
             st.rerun()
 
     st.sidebar.divider()
 
     if not chats:
+        logger.debug("No chats available to display")
         st.sidebar.caption("No chats yet.")
         return
 
+    logger.debug(f"Rendering {len(chats)} chats in sidebar")
     for chat in chats:
         chat_id = chat["id"]
         is_selected = chat_id == st.session_state.chat_id
@@ -223,17 +262,20 @@ def render_sidebar(chats):
                 use_container_width=True,
                 type="primary" if is_selected else "secondary",
             ):
+                logger.info(f"Chat selected: {chat_id}")
                 st.session_state.chat_id = chat_id
                 st.rerun()
 
         with col2:
             if st.button("", icon="🗑️", key=f"delete-{chat_id}"):
+                logger.warning(f"Delete button clicked for chat: {chat_id}")
                 delete_chat(chat_id)
                 st.session_state.messages_by_chat.pop(chat_id, None)
 
                 if st.session_state.chat_id == chat_id:
                     remaining = [c for c in chats if c["id"] != chat_id]
                     st.session_state.chat_id = remaining[0]["id"] if remaining else None
+                    logger.info(f"Chat deleted: {chat_id}")
 
                 st.rerun()
 
@@ -259,7 +301,6 @@ def show_upload_progress(result: dict, api_base_url: str = API_URL, *, timeout: 
         st.session_state.uploading_docs = False
         return
 
-    # CHANGED: robust join to support leading "/" in sse_path and avoid double slashes
     sse_url = f"{api_base_url.rstrip('/')}/{str(sse_path).lstrip('/')}"
 
     fname = (result or {}).get("file") or ""
@@ -274,8 +315,6 @@ def show_upload_progress(result: dict, api_base_url: str = API_URL, *, timeout: 
         if fname:
             st.caption(f"Processing: {fname}")
         bar = st.progress(0, text="Processing...")
-        # CHANGED: remove JSON box entirely
-        status_box = None
 
     def _clamp(x: int) -> int:
         return max(0, min(100, x))
@@ -348,11 +387,10 @@ def show_upload_progress(result: dict, api_base_url: str = API_URL, *, timeout: 
                 payload = json.loads(data_str)
             except Exception:
                 logger.warning(
-                    "Got a progress update, but it wasn’t valid JSON. Event=%s Data=%r",
+                    "Got a progress update, but it wasn't valid JSON. Event=%s Data=%r",
                     event_name,
                     data_str,
                 )
-                # CHANGED: do not render JSON to UI
                 continue
 
             prog, message, done = _extract_progress_and_msg(payload)
@@ -365,15 +403,14 @@ def show_upload_progress(result: dict, api_base_url: str = API_URL, *, timeout: 
                 last_msg = event_name
 
             if prog is not None:
-                logger.info("Still working… %s%% — %s", _clamp(last_p), last_msg)
+                logger.debug("Progress update: %s%% — %s", _clamp(last_p), last_msg)
             else:
-                logger.info("Still working… %s", last_msg)
+                logger.debug("Status update: %s", last_msg)
 
             bar.progress(_clamp(last_p), text=last_msg)
-            # CHANGED: remove JSON rendering entirely (status_box unused)
 
             if done:
-                logger.info("All done — wrapping things up.")
+                logger.info("Upload processing completed.")
                 break
 
         bar.progress(100, text="Complete ✅")
@@ -381,86 +418,95 @@ def show_upload_progress(result: dict, api_base_url: str = API_URL, *, timeout: 
         time.sleep(0.35)
 
     except Exception as e:
-        logger.exception("Progress stream ran into a problem: %s", e)
-        # CHANGED: no JSON/status box; show error normally
+        logger.error(f"Progress stream error: {e}" )
         st.error(f"Progress stream error: {e}")
         time.sleep(0.75)
 
     finally:
-        # CHANGED: ensure uploader returns after progress finishes (fixes "stuck" + double sections on rerun)
         st.session_state.uploading_docs = False
         container.empty()
         logger.debug("Progress UI cleared.")
 
 
 def render_documents_panel(chat_id: str):
-    with st.container():
-        left, right = st.columns([1, 3], vertical_alignment="center")
-
-        if not st.session_state.uploading_docs:
-            with left:
-                st.subheader("📎 Documents")
-
-        with right:
-            slot = st.empty()
-
-            if st.session_state.uploading_docs:
-                with slot.container():
-                    st.info("Upload in progress… hang tight 🙂")
-                    st.spinner("Processing…")
-                uploaded = None
-            else:
-                with slot.container():
-                    uploader_key = f"file_uploader_{st.session_state.uploader_key}"
-                    uploaded = st.file_uploader(
-                        "Upload document",
-                        label_visibility="collapsed",
-                        type=["txt", "pdf", "docx"],
-                        key=uploader_key,
-                    )
-
+    """Fixed: Clean upload flow - hide uploader during upload"""
+    logger.debug(f"Rendering documents panel for chat {chat_id}")
+    st.subheader("📎 Documents")
+    
+    upload_container = st.container()
+    
+    with upload_container:
+        if st.session_state.uploading_docs:
+            logger.debug("Upload in progress, showing progress UI")
+            st.info("⏳ Processing your document...")
+            st.progress(100, text="Uploading & Vectorizing...")
+        else:
+            uploader_key = f"file_uploader_{st.session_state.uploader_key}"
+            uploaded = st.file_uploader(
+                "Upload document (TXT, PDF, DOCX)",
+                type=["txt", "pdf", "docx"],
+                key=uploader_key,
+                label_visibility="collapsed"
+            )
+            
             if uploaded:
+                logger.info(f"File selected for upload: {uploaded.name} ({format_file_size(uploaded.size)})")
                 fp = file_fingerprint(uploaded)
                 if fp not in st.session_state.uploaded_fingerprints:
+                    logger.info(f"New file detected, starting upload process: {uploaded.name}")
                     st.session_state.uploaded_fingerprints.add(fp)
-                    st.session_state.uploading_docs = True  # CHANGED: flip immediately so uploader disappears right away
-                    slot.empty()  # CHANGED: clear uploader UI instantly (prevents double section during this run)
-
+                    st.session_state.uploading_docs = True
+                    
+                    success_msg = st.success(f"✅ {uploaded.name} received")
+                    
                     result = upload_file(chat_id, uploaded)
-                    st.success(f"Uploaded {uploaded.name}")
-                    logger.info(f"-----> {result = }")
-                    show_upload_progress(result=result)
-
-                st.session_state.uploader_key += 1
-                st.rerun()
-
-        with st.expander("View uploaded files", expanded=False):
-            files = cached_fetch_uploaded_files(chat_id) or []
-            if not files:
-                st.caption("No documents uploaded yet.")
-            else:
-                for f in files:
-                    st.markdown(
-                        f"- **{f.get('file_name','')}**  \n"
-                        f"<small>{f.get('file_type','unknown')} • {format_file_size(f.get('file_size'))}</small>",
-                        unsafe_allow_html=True,
-                    )
+                    
+                    if result:
+                        show_upload_progress(result=result)
+                    
+                    success_msg.empty()
+                    st.session_state.uploader_key += 1
+                    st.cache_data.clear()
+                    logger.info(f"File upload process completed for: {uploaded.name}")
+                    st.rerun()
+                else:
+                    logger.warning(f"Duplicate file upload attempt: {uploaded.name}")
+    
+    st.divider()
+    
+    with st.expander("📂 View uploaded files", expanded=False):
+        logger.debug(f"Fetching uploaded files for chat {chat_id}")
+        files = cached_fetch_uploaded_files(chat_id) or []
+        if not files:
+            logger.debug(f"No files uploaded for chat {chat_id}")
+            st.caption("No documents uploaded yet.")
+        else:
+            logger.info(f"Displaying {len(files)} uploaded files for chat {chat_id}")
+            for f in files:
+                st.markdown(
+                    f"📄 **{f.get('file_name', '')}**  \n"
+                    f"`{f.get('file_type', 'unknown')}` • {format_file_size(f.get('file_size'))}",
+                )
 
 
 def render_messages(messages):
+    logger.debug(f"Rendering {len(messages)} messages")
     for m in messages:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
 
 def main():
+    logger.info("Starting RAG Chat application")
     st.set_page_config(page_title="RAG Chat", layout="wide")
     init_state()
 
     if not cached_health():
+        logger.error("Backend health check failed")
         st.error("Backend not reachable")
         return
 
+    logger.info("Backend is healthy, loading chats")
     chats = cached_fetch_chats() or []
     ensure_default_chat_selected(chats)
 
@@ -468,11 +514,14 @@ def main():
 
     chat_id = st.session_state.chat_id
     if not chat_id:
+        logger.warning("No chat selected, showing create chat message")
         st.info("Create a chat to begin")
         return
 
     selected_chat = next((c for c in chats if c["id"] == chat_id), None)
-    st.header(selected_chat.get("chat_name", "Chat") if selected_chat else "Chat")
+    chat_name = selected_chat.get("chat_name", "Chat") if selected_chat else "Chat"
+    logger.info(f"Active chat: {chat_name} (ID: {chat_id})")
+    st.header(chat_name)
 
     load_messages_once(chat_id)
 
@@ -487,18 +536,22 @@ def main():
     if not prompt:
         return
 
+    logger.info(f"User submitted query to chat {chat_id}")
+    logger.debug(f"Query: {prompt[:100]}...")
     messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
+            logger.info(f"Processing query for chat {chat_id}")
             response = ask_question(chat_id, prompt) or {}
             answer = response.get("answer") or "⚠️ No answer returned"
 
         typewriter(answer, speed=0.000012)
 
         docs = response.get("retrieved_docs", []) or []
+        logger.info(f"Retrieved {len(docs)} documents for answer")
         if docs:
             with st.expander("Sources"):
                 for d in docs:
@@ -509,6 +562,7 @@ def main():
                     )
 
     messages.append({"role": "assistant", "content": answer})
+    logger.info(f"Message exchange completed for chat {chat_id}")
 
 
 if __name__ == "__main__":

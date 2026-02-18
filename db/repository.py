@@ -11,7 +11,7 @@ from utils.logger import get_logger
 logger = get_logger()
 
 
-async def save_chat_file(
+def save_chat_file(
     db: AsyncSession,
     chat_id: UUID,
     file_name: str,
@@ -28,12 +28,12 @@ async def save_chat_file(
             file_path=file_path,
         )
         db.add(chat_file)
-        await db.commit()
-        await db.refresh(chat_file)
+        db.commit()
+        db.refresh(chat_file)
         logger.info(f"Saved chat file: {file_name} for chat {chat_id}")
         return chat_file
     except SQLAlchemyError as e:
-        await db.rollback()
+        db.rollback()
         logger.error(f"Error saving chat file: {e}")
         raise
 

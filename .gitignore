@@ -19,3 +19,6 @@ models/
 .agent
 
 notes/
+
+# Docker
+docker-details.txt

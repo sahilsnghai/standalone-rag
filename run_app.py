@@ -6,59 +6,9 @@ import webbrowser
 from time import sleep
 
 from utils.logger import get_logger
+from utils.check_dependency import run_all_checks
 
 logger = get_logger()
-
-
-def check_dependencies():
-    """Check if required dependencies are installed"""
-    try:
-        import fastapi
-        import langchain
-        import langgraph
-        import openai
-        import sqlalchemy
-        import streamlit
-        import uvicorn
-
-        logger.info("All required packages are installed.")
-        return True
-    except ImportError as e:
-        logger.error(f"Missing dependency: {e}")
-        logger.error(
-            "Please install all required packages using: pip install -r requirements.txt"
-        )
-        return False
-
-
-def check_env_file():
-    """Check if .env file exists and has required variables"""
-    if not os.path.exists(".env"):
-        logger.error(".env file not found.")
-        logger.error(
-            "Please copy .env.example to .env and update it with your details."
-        )
-        return False
-
-    with open(".env", "r") as f:
-        content = f.read()
-
-    required_vars = ["DATABASE_URL", "OPENAI_API_KEY"]
-    missing_vars = []
-
-    for var in required_vars:
-        if f"{var}=" not in content:
-            missing_vars.append(var)
-
-    if missing_vars:
-        logger.error(
-            f"Some environment variables are missing: {', '.join(missing_vars)}"
-        )
-        logger.error("Please add them to your .env file and try again.")
-        return False
-
-    logger.info("Environment setup looks fine.")
-    return True
 
 
 def start_backend(port=8000):
@@ -159,10 +109,7 @@ def start_both(backend_port=8000, frontend_port=8501):
     logger.info("Starting RAG Application...")
     logger.info("=" * 50)
 
-    if not check_dependencies():
-        sys.exit(1)
-
-    if not check_env_file():
+    if not run_all_checks():
         sys.exit(1)
 
     logger.info("\nStarting backend and frontend services...")
@@ -170,13 +117,18 @@ def start_both(backend_port=8000, frontend_port=8501):
     backend_process = subprocess.Popen(
         [
             sys.executable,
-            "-c",
-            f"""
-            import subprocess
-            import sys
-            cmd = [sys.executable, "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "{backend_port}",  "--reload", "--reload-exclude","ui/*", "run_app.py" ]
-            subprocess.run(cmd)
-            """,
+            "-m",
+            "uvicorn",
+            "api.main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(backend_port),
+            "--reload",
+            "--reload-exclude",
+            "ui/*",
+            "--reload-exclude",
+            "run_app.py",
         ]
     )
 
