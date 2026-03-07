@@ -148,6 +148,7 @@ def upload_file(chat_id: str, file):
     except Exception as e:
         logger.error(f"Backend error in upload_file: {e}")
         st.error(f"Backend error: {e}")
+        return None
 
 
 def ask_question(chat_id: str, query: str):
@@ -189,6 +190,7 @@ def init_state():
     st.session_state.setdefault("uploader_key", 0)
     st.session_state.setdefault("messages_by_chat", {})
     st.session_state.setdefault("uploading_docs", False)
+    st.session_state.setdefault("current_upload_file", None)
     logger.debug("Session state initialized")
 
 
@@ -202,10 +204,6 @@ def ensure_default_chat_selected(chats):
 
 
 def load_messages_once(chat_id: str):
-    """
-    Load backend history only once per chat into session state.
-    Prevents duplicated rendering and removes the need for a separate 'messages' list.
-    """
     if chat_id not in st.session_state.messages_by_chat:
         logger.info(f"Loading message history for chat {chat_id}")
         history = cached_fetch_history(chat_id) or []
@@ -280,29 +278,13 @@ def render_sidebar(chats):
                 st.rerun()
 
 
-def show_upload_progress(result: dict, api_base_url: str = API_URL, *, timeout: int = 300):
-    """
-    Streamlit progress UI driven by your SSE format:
-
-      event: <event_name>
-      data: {"progress": 10, "message": "..."}   (JSON)
-      (blank line)
-
-    Notes:
-    - `result` must contain `sse_url` (relative or absolute)
-    - Progress keys supported in JSON data: progress|percent|pct
-    - Message keys supported: message|status|detail
-    - Auto-completes when progress>=100 or state/done flags indicate completion
-    - UI vanishes once complete
-    """
+def show_upload_progress(progress_container, result: dict, api_base_url: str = API_URL, *, timeout: int = 300):
     sse_path = (result or {}).get("sse_url")
     if not sse_path:
         logger.info("No SSE URL found in the upload result — skipping progress UI.")
-        st.session_state.uploading_docs = False
         return
 
     sse_url = f"{api_base_url.rstrip('/')}/{str(sse_path).lstrip('/')}"
-
     fname = (result or {}).get("file") or ""
     logger.info(
         "Starting upload progress stream%s. SSE: %s",
@@ -310,167 +292,157 @@ def show_upload_progress(result: dict, api_base_url: str = API_URL, *, timeout: 
         sse_url,
     )
 
-    container = st.container()
-    with container:
+    with progress_container:
         if fname:
             st.caption(f"Processing: {fname}")
         bar = st.progress(0, text="Processing...")
 
-    def _clamp(x: int) -> int:
-        return max(0, min(100, x))
+        def _clamp(x: int) -> int:
+            return max(0, min(100, x))
 
-    def _iter_sse(url: str):
-        logger.debug("Opening SSE connection…")
-        with requests.get(url, stream=True, timeout=timeout) as r:
-            r.raise_for_status()
-            logger.debug("SSE connection established (HTTP %s).", r.status_code)
+        def _iter_sse(url: str):
+            logger.debug("Opening SSE connection…")
+            with requests.get(url, stream=True, timeout=timeout) as r:
+                r.raise_for_status()
+                logger.debug("SSE connection established (HTTP %s).", r.status_code)
 
-            buf = ""
-            event_name = None
-            data_lines = []
+                buf = ""
+                event_name = None
+                data_lines = []
 
-            for chunk in r.iter_content(chunk_size=1024, decode_unicode=True):
-                if not chunk:
+                for chunk in r.iter_content(chunk_size=1024, decode_unicode=True):
+                    if not chunk:
+                        continue
+                    buf += chunk
+
+                    while "\n\n" in buf:
+                        raw_event, buf = buf.split("\n\n", 1)
+
+                        event_name = None
+                        data_lines = []
+
+                        for line in raw_event.splitlines():
+                            if line.startswith("event:"):
+                                event_name = line[len("event:"):].strip()
+                            elif line.startswith("data:"):
+                                data_lines.append(line[len("data:"):].lstrip())
+
+                        data_str = "\n".join(data_lines) if data_lines else ""
+                        yield event_name, data_str
+
+        def _extract_progress_and_msg(payload: dict):
+            p = payload.get("progress", payload.get("percent", payload.get("pct")))
+            msg = payload.get("message", payload.get("status", payload.get("detail")))
+
+            prog = None
+            if p is not None:
+                try:
+                    prog = int(float(p))
+                except Exception:
+                    prog = None
+
+            message = msg if isinstance(msg, str) and msg.strip() else None
+
+            state = str(payload.get("state", "")).lower()
+            done_flag = payload.get("done", payload.get("completed", payload.get("finished")))
+            done = bool(done_flag) or state in {"done", "completed", "finished", "success", "succeeded"}
+
+            if prog is not None and prog >= 100:
+                done = True
+
+            return prog, message, done
+
+        last_p = 0
+        last_msg = "Processing..."
+
+        try:
+            for event_name, data_str in _iter_sse(sse_url):
+                if not data_str:
+                    logger.debug("Received SSE event '%s' with no data — ignoring.", event_name)
                     continue
-                buf += chunk
 
-                while "\n\n" in buf:
-                    raw_event, buf = buf.split("\n\n", 1)
+                try:
+                    payload = json.loads(data_str)
+                except Exception:
+                    logger.warning(
+                        "Got a progress update, but it wasn't valid JSON. Event=%s Data=%r",
+                        event_name,
+                        data_str,
+                    )
+                    continue
 
-                    event_name = None
-                    data_lines = []
+                prog, message, done = _extract_progress_and_msg(payload)
 
-                    for line in raw_event.splitlines():
-                        if line.startswith("event:"):
-                            event_name = line[len("event:"):].strip()
-                        elif line.startswith("data:"):
-                            data_lines.append(line[len("data:"):].lstrip())
+                if prog is not None:
+                    last_p = prog
+                if message is not None:
+                    last_msg = message
+                elif event_name:
+                    last_msg = event_name
 
-                    data_str = "\n".join(data_lines) if data_lines else ""
-                    yield event_name, data_str
+                if prog is not None:
+                    logger.debug("Progress update: %s%% — %s", _clamp(last_p), last_msg)
+                else:
+                    logger.debug("Status update: %s", last_msg)
 
-    def _extract_progress_and_msg(payload: dict):
-        p = payload.get("progress", payload.get("percent", payload.get("pct")))
-        msg = payload.get("message", payload.get("status", payload.get("detail")))
+                bar.progress(_clamp(last_p), text=last_msg)
 
-        prog = None
-        if p is not None:
-            try:
-                prog = int(float(p))
-            except Exception:
-                prog = None
+                if done:
+                    logger.info("Upload processing completed.")
+                    break
 
-        message = msg if isinstance(msg, str) and msg.strip() else None
+            bar.progress(100, text="Complete ✅")
+            logger.info("Progress UI completed successfully.")
+            time.sleep(0.5)
 
-        state = str(payload.get("state", "")).lower()
-        done_flag = payload.get("done", payload.get("completed", payload.get("finished")))
-        done = bool(done_flag) or state in {"done", "completed", "finished", "success", "succeeded"}
-
-        if prog is not None and prog >= 100:
-            done = True
-
-        return prog, message, done
-
-    last_p = 0
-    last_msg = "Processing..."
-    st.session_state.uploading_docs = True
-
-    try:
-        for event_name, data_str in _iter_sse(sse_url):
-            st.session_state.uploading_docs = True
-
-            if not data_str:
-                logger.debug("Received SSE event '%s' with no data — ignoring.", event_name)
-                continue
-
-            try:
-                payload = json.loads(data_str)
-            except Exception:
-                logger.warning(
-                    "Got a progress update, but it wasn't valid JSON. Event=%s Data=%r",
-                    event_name,
-                    data_str,
-                )
-                continue
-
-            prog, message, done = _extract_progress_and_msg(payload)
-
-            if prog is not None:
-                last_p = prog
-            if message is not None:
-                last_msg = message
-            elif event_name:
-                last_msg = event_name
-
-            if prog is not None:
-                logger.debug("Progress update: %s%% — %s", _clamp(last_p), last_msg)
-            else:
-                logger.debug("Status update: %s", last_msg)
-
-            bar.progress(_clamp(last_p), text=last_msg)
-
-            if done:
-                logger.info("Upload processing completed.")
-                break
-
-        bar.progress(100, text="Complete ✅")
-        logger.info("Progress UI completed successfully.")
-        time.sleep(0.35)
-
-    except Exception as e:
-        logger.error(f"Progress stream error: {e}" )
-        st.error(f"Progress stream error: {e}")
-        time.sleep(0.75)
-
-    finally:
-        st.session_state.uploading_docs = False
-        container.empty()
-        logger.debug("Progress UI cleared.")
+        except Exception as e:
+            logger.error(f"Progress stream error: {e}")
+            st.error(f"Progress stream error: {e}")
+            time.sleep(0.5)
 
 
 def render_documents_panel(chat_id: str):
-    """Fixed: Clean upload flow - hide uploader during upload"""
     logger.debug(f"Rendering documents panel for chat {chat_id}")
     st.subheader("📎 Documents")
     
-    upload_container = st.container()
+    uploader_key = f"file_uploader_{st.session_state.uploader_key}"
     
-    with upload_container:
-        if st.session_state.uploading_docs:
-            logger.debug("Upload in progress, showing progress UI")
-            st.info("⏳ Processing your document...")
-            st.progress(100, text="Uploading & Vectorizing...")
-        else:
-            uploader_key = f"file_uploader_{st.session_state.uploader_key}"
-            uploaded = st.file_uploader(
-                "Upload document (TXT, PDF, DOCX)",
-                type=["txt", "pdf", "docx"],
-                key=uploader_key,
-                label_visibility="collapsed"
-            )
+    if st.session_state.uploading_docs:
+        st.info("⏳ Processing your document...")
+        progress_container = st.container()
+        
+        if st.session_state.current_upload_file is not None:
+            result = upload_file(chat_id, st.session_state.current_upload_file)
             
-            if uploaded:
-                logger.info(f"File selected for upload: {uploaded.name} ({format_file_size(uploaded.size)})")
-                fp = file_fingerprint(uploaded)
-                if fp not in st.session_state.uploaded_fingerprints:
-                    logger.info(f"New file detected, starting upload process: {uploaded.name}")
-                    st.session_state.uploaded_fingerprints.add(fp)
-                    st.session_state.uploading_docs = True
-                    
-                    success_msg = st.success(f"✅ {uploaded.name} received")
-                    
-                    result = upload_file(chat_id, uploaded)
-                    
-                    if result:
-                        show_upload_progress(result=result)
-                    
-                    success_msg.empty()
-                    st.session_state.uploader_key += 1
-                    st.cache_data.clear()
-                    logger.info(f"File upload process completed for: {uploaded.name}")
-                    st.rerun()
-                else:
-                    logger.warning(f"Duplicate file upload attempt: {uploaded.name}")
+            if result:
+                show_upload_progress(progress_container, result=result)
+            
+            st.session_state.current_upload_file = None
+            st.session_state.uploading_docs = False
+            st.session_state.uploader_key += 1
+            st.cache_data.clear()
+            logger.info("File upload process completed")
+            time.sleep(0.3)
+            st.rerun()
+    else:
+        uploaded = st.file_uploader(
+            "Upload document (TXT, PDF, DOCX)",
+            type=["txt", "pdf", "docx"],
+            key=uploader_key,
+            label_visibility="collapsed"
+        )
+        
+        if uploaded:
+            logger.info(f"File selected for upload: {uploaded.name} ({format_file_size(uploaded.size)})")
+            fp = file_fingerprint(uploaded)
+            if fp not in st.session_state.uploaded_fingerprints:
+                logger.info(f"New file detected, starting upload process: {uploaded.name}")
+                st.session_state.uploaded_fingerprints.add(fp)
+                st.session_state.current_upload_file = uploaded
+                st.session_state.uploading_docs = True
+                st.rerun()
+            else:
+                logger.warning(f"Duplicate file upload attempt: {uploaded.name}")
     
     st.divider()
     
